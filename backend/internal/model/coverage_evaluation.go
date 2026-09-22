@@ -12,6 +12,8 @@ type CoverageEvaluation struct {
 	CoverageScore           float64           `gorm:"not null" json:"coverage_score"`
 	UncoveredPaths          string            `gorm:"type:text;not null" json:"uncovered_paths"`
 	DeduplicatedSafeguards  string            `gorm:"type:text;not null" json:"deduplicated_safeguards"`
+	FailureWindowDays       int               `gorm:"not null;default:30;uniqueIndex:idx_coverage_idem_window" json:"failure_window_days"`
+	FailureForecast         string            `gorm:"type:text;not null;default:'{}'" json:"failure_forecast"`
 	RiskRankBefore          string            `gorm:"size:24;not null" json:"risk_rank_before"`
 	RiskRankAfter           string            `gorm:"size:24;not null" json:"risk_rank_after"`
 	EvaluationState         string            `gorm:"size:24;not null;index" json:"evaluation_state"`
@@ -21,7 +23,7 @@ type CoverageEvaluation struct {
 	EvaluatedAt             time.Time         `gorm:"not null" json:"evaluated_at"`
 	CreatedAt               time.Time         `gorm:"not null" json:"created_at"`
 	UpdatedAt               time.Time         `gorm:"not null" json:"updated_at"`
-	IdempotencyKey          string            `gorm:"size:128;not null;uniqueIndex" json:"idempotency_key"`
+	IdempotencyKey          string            `gorm:"size:128;not null;uniqueIndex:idx_coverage_idem_window" json:"idempotency_key"`
 	DurationMilliseconds    int64             `gorm:"not null" json:"duration_milliseconds"`
 	FailureReason           string            `gorm:"type:text" json:"failure_reason,omitempty"`
 	ConfirmedBy             *uint             `json:"confirmed_by,omitempty"`

@@ -31,12 +31,16 @@ export function useCoverageRun() {
     return current
   }
 
-  async function launch(scenarioId: number) {
+  async function launch(scenarioId: number, failureWindowDays?: number) {
     stop()
     running.value = true
     try {
-      const key = `coverage-${scenarioId}-${crypto.randomUUID()}`
-      return await watch(await store.run(scenarioId, key))
+      // The window is part of the frozen snapshot, so it must also scope the
+      // idempotency key: re-running with another window creates a new
+      // deterministic evaluation rather than returning the old one.
+      const windowPart = failureWindowDays ?? 30
+      const key = `coverage-${scenarioId}-w${windowPart}-${crypto.randomUUID()}`
+      return await watch(await store.run(scenarioId, key, failureWindowDays))
     } finally { running.value = false }
   }
 

@@ -1,4 +1,5 @@
 package repository
+
 import (
 	"context"
 	"encoding/json"
@@ -9,10 +10,11 @@ import (
 	"strings"
 	"time"
 )
+
 type CoverageEvaluationRepository interface {
 	Create(context.Context, *model.CoverageEvaluation) error
 	GetByID(context.Context, uint) (model.CoverageEvaluation, error)
-	FindByIdempotencyKey(context.Context, string) (model.CoverageEvaluation, error)
+	FindByIdempotencyKey(context.Context, string, int) (model.CoverageEvaluation, error)
 	List(context.Context, dto.CoverageEvaluationQuery) ([]model.CoverageEvaluation, int64, error)
 	Transition(context.Context, uint, []string, string, map[string]any) (bool, error)
 	Complete(context.Context, uint, string, map[string]any) (bool, error)
@@ -39,6 +41,7 @@ type AuditQuery struct {
 type coverageEvaluationRepository struct{ db *gorm.DB }
 type auditRepository struct{ db *gorm.DB }
 type userRepository struct{ db *gorm.DB }
+
 func NewCoverageEvaluationRepository(db *gorm.DB) CoverageEvaluationRepository {
 	return &coverageEvaluationRepository{db: db}
 }
@@ -57,9 +60,11 @@ func (r *coverageEvaluationRepository) GetByID(ctx context.Context, id uint) (mo
 	}
 	return evaluation, nil
 }
-func (r *coverageEvaluationRepository) FindByIdempotencyKey(ctx context.Context, key string) (model.CoverageEvaluation, error) {
+func (r *coverageEvaluationRepository) FindByIdempotencyKey(ctx context.Context, key string, windowDays int) (model.CoverageEvaluation, error) {
 	var evaluation model.CoverageEvaluation
-	if err := r.db.WithContext(ctx).Where("idempotency_key = ?", key).First(&evaluation).Error; err != nil {
+	if err := r.db.WithContext(ctx).
+		Where("idempotency_key = ? AND failure_window_days = ?", key, windowDays).
+		First(&evaluation).Error; err != nil {
 		return model.CoverageEvaluation{}, fmt.Errorf("find evaluation by idempotency key: %w", err)
 	}
 	return evaluation, nil

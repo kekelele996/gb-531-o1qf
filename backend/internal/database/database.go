@@ -1,4 +1,5 @@
 package database
+
 import (
 	"context"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"hazop-safeguard-coverage/backend/internal/model"
 	"time"
 )
+
 func Open(cfg config.Config) (*gorm.DB, error) {
 	var dialector gorm.Dialector
 	switch cfg.DBDriver {
@@ -68,14 +70,27 @@ func migrate(db *gorm.DB) error {
 	if err != nil {
 		return fmt.Errorf("migrate database schema: %w", err)
 	}
+	// The failure window feature replaced the single-column idempotency
+	// unique index with (idempotency_key, failure_window_days). AutoMigrate
+	// creates the new index but never drops obsolete ones, so remove the old
+	// index explicitly when it is still present (harmless on fresh databases).
+	for _, indexName := range []string{"idx_coverage_evaluations_idempotency_key"} {
+		if db.Migrator().HasIndex(&model.CoverageEvaluation{}, indexName) {
+			if err := db.Migrator().DropIndex(&model.CoverageEvaluation{}, indexName); err != nil {
+				return fmt.Errorf("drop legacy index %s: %w", indexName, err)
+			}
+		}
+	}
 	return nil
 }
+
 type seedAccount struct {
 	Username    string
 	DisplayName string
 	Password    string
 	Role        constants.Role
 }
+
 func seed(db *gorm.DB) error {
 	accounts := []seedAccount{
 		{Username: "admin", DisplayName: "System Administrator", Password: "admin123", Role: constants.RoleAdmin},

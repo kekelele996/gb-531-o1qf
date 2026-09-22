@@ -1,4 +1,5 @@
 package algorithm
+
 import (
 	"fmt"
 	"hazop-safeguard-coverage/backend/internal/dto"
@@ -6,6 +7,7 @@ import (
 	"strings"
 	"time"
 )
+
 type IndependenceResult struct {
 	Retained     []SnapshotSafeguard
 	Deduplicated []dto.DeduplicatedSafeguardResponse
@@ -15,7 +17,16 @@ type RejectedSafeguard struct {
 	ID     uint   `json:"id"`
 	Reason string `json:"reason"`
 }
+
 func ResolveIndependence(safeguards []SnapshotSafeguard, referenceTime time.Time) IndependenceResult {
+	return resolveIndependence(safeguards, referenceTime, false)
+}
+
+// resolveIndependence performs the deterministic eligibility and independence
+// grouping. At inclusiveExpiry=true a safeguard whose verification expires
+// exactly at referenceTime is treated as expired, which is required for the
+// future failure window projection at each layer's expiry date.
+func resolveIndependence(safeguards []SnapshotSafeguard, referenceTime time.Time, inclusiveExpiry bool) IndependenceResult {
 	groups := make(map[string][]SnapshotSafeguard)
 	result := IndependenceResult{}
 	for _, safeguard := range safeguards {
@@ -24,7 +35,7 @@ func ResolveIndependence(safeguards []SnapshotSafeguard, referenceTime time.Time
 			result.Rejected = append(result.Rejected, RejectedSafeguard{ID: safeguard.ID, Reason: "missing independence key"})
 			continue
 		}
-		if reason := ineligibleReason(safeguard, referenceTime); reason != "" {
+		if reason := ineligibleReasonAt(safeguard, referenceTime, inclusiveExpiry); reason != "" {
 			result.Rejected = append(result.Rejected, RejectedSafeguard{ID: safeguard.ID, Reason: reason})
 			continue
 		}
@@ -59,6 +70,10 @@ func ResolveIndependence(safeguards []SnapshotSafeguard, referenceTime time.Time
 	return result
 }
 func ineligibleReason(safeguard SnapshotSafeguard, referenceTime time.Time) string {
+	return ineligibleReasonAt(safeguard, referenceTime, false)
+}
+
+func ineligibleReasonAt(safeguard SnapshotSafeguard, referenceTime time.Time, inclusiveExpiry bool) string {
 	if safeguard.LifecycleState != "active" {
 		return fmt.Sprintf("lifecycle state %q is not active", safeguard.LifecycleState)
 	}
@@ -72,7 +87,11 @@ func ineligibleReason(safeguard SnapshotSafeguard, referenceTime time.Time) stri
 		return "test interval is invalid"
 	}
 	expires := safeguard.LastVerifiedAt.AddDate(0, 0, safeguard.TestIntervalDays)
-	if referenceTime.After(expires) {
+	expired := referenceTime.After(expires)
+	if inclusiveExpiry && !referenceTime.Before(expires) {
+		expired = true
+	}
+	if expired {
 		return fmt.Sprintf("verification expired at %s", expires.UTC().Format(time.RFC3339))
 	}
 	return ""

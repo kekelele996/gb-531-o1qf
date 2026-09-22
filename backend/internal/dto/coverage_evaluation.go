@@ -1,11 +1,14 @@
 package dto
+
 import (
 	"encoding/json"
 	"hazop-safeguard-coverage/backend/internal/model"
 	"time"
 )
+
 type RunCoverageEvaluationRequest struct {
-	ScenarioID uint `json:"scenario_id" binding:"required"`
+	ScenarioID        uint `json:"scenario_id" binding:"required"`
+	FailureWindowDays int  `json:"failure_window_days"`
 }
 type CoverageEvaluationQuery struct {
 	ScenarioID uint
@@ -39,6 +42,23 @@ type DeduplicatedSafeguardResponse struct {
 	IgnoredIDs      []uint `json:"ignored_ids"`
 	Reason          string `json:"reason"`
 }
+type FailureWindowEventResponse struct {
+	HorizonDays         int                    `json:"horizon_days"`
+	ExpiresAt           time.Time              `json:"expires_at"`
+	ExpiredSafeguardIDs []uint                 `json:"expired_safeguard_ids"`
+	CoverageScore       float64                `json:"coverage_score"`
+	RiskRankAfter       string                 `json:"risk_rank_after"`
+	RiskRankIncreased   bool                   `json:"risk_rank_increased"`
+	UncoveredPaths      []CoveragePathResponse `json:"uncovered_paths"`
+}
+type FailureWindowForecastResponse struct {
+	WindowDays       int                          `json:"window_days"`
+	WindowEnd        time.Time                    `json:"window_end"`
+	Events           []FailureWindowEventResponse `json:"events"`
+	FirstEscalation  *FailureWindowEventResponse  `json:"first_escalation,omitempty"`
+	EscalationWithin bool                         `json:"escalation_within_window"`
+	ForecastNote     string                       `json:"forecast_note"`
+}
 type EvaluationExplanation struct {
 	Summary       string                          `json:"summary"`
 	Paths         []CoveragePathResponse          `json:"paths"`
@@ -56,6 +76,8 @@ type CoverageEvaluationResponse struct {
 	CoverageScore          float64                         `json:"coverage_score"`
 	UncoveredPaths         []CoveragePathResponse          `json:"uncovered_paths"`
 	DeduplicatedSafeguards []DeduplicatedSafeguardResponse `json:"deduplicated_safeguards"`
+	FailureWindowDays      int                             `json:"failure_window_days"`
+	FailureForecast        FailureWindowForecastResponse   `json:"failure_forecast"`
 	RiskRankBefore         string                          `json:"risk_rank_before"`
 	RiskRankAfter          string                          `json:"risk_rank_after"`
 	EvaluationState        string                          `json:"evaluation_state"`
@@ -78,13 +100,17 @@ type CoverageEvaluationListResponse struct {
 	Size  int                          `json:"page_size"`
 }
 type EvaluationComparisonResponse struct {
-	BaseID             uint    `json:"base_id"`
-	ComparedID         uint    `json:"compared_id"`
-	ScoreDelta         float64 `json:"score_delta"`
-	UncoveredPathDelta int     `json:"uncovered_path_delta"`
-	RiskRankChanged    bool    `json:"risk_rank_changed"`
-	InputChanged       bool    `json:"input_changed"`
+	BaseID              uint    `json:"base_id"`
+	ComparedID          uint    `json:"compared_id"`
+	ScoreDelta          float64 `json:"score_delta"`
+	UncoveredPathDelta  int     `json:"uncovered_path_delta"`
+	RiskRankChanged     bool    `json:"risk_rank_changed"`
+	InputChanged        bool    `json:"input_changed"`
+	BaseEscalationDays  *int    `json:"base_escalation_days,omitempty"`
+	OtherEscalationDays *int    `json:"other_escalation_days,omitempty"`
+	EscalationChanged   bool    `json:"escalation_changed"`
 }
+
 func NewCoverageEvaluationResponse(e model.CoverageEvaluation) CoverageEvaluationResponse {
 	response := CoverageEvaluationResponse{
 		ID: e.ID, ScenarioID: e.ScenarioID, AlgorithmVersion: e.AlgorithmVersion,
@@ -95,10 +121,16 @@ func NewCoverageEvaluationResponse(e model.CoverageEvaluation) CoverageEvaluatio
 		IdempotencyKey: e.IdempotencyKey, DurationMilliseconds: e.DurationMilliseconds,
 		FailureReason: e.FailureReason, ConfirmedBy: e.ConfirmedBy, ConfirmedAt: e.ConfirmedAt,
 		ReplayPassed: e.DeterminismReplayPassed, CreatedAt: e.CreatedAt,
+		FailureWindowDays: e.FailureWindowDays,
 	}
 	_ = json.Unmarshal([]byte(e.UncoveredPaths), &response.UncoveredPaths)
 	_ = json.Unmarshal([]byte(e.DeduplicatedSafeguards), &response.DeduplicatedSafeguards)
 	_ = json.Unmarshal([]byte(e.Explanation), &response.Explanation)
+	if err := json.Unmarshal([]byte(e.FailureForecast), &response.FailureForecast); err != nil || response.FailureForecast.Events == nil {
+		response.FailureForecast = FailureWindowForecastResponse{
+			WindowDays: e.FailureWindowDays, Events: []FailureWindowEventResponse{},
+		}
+	}
 	return response
 }
 func rawJSON(value string) json.RawMessage {

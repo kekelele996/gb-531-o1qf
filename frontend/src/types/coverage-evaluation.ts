@@ -34,6 +34,25 @@ export interface DeduplicatedSafeguard {
   reason: string
 }
 
+export interface FailureWindowEvent {
+  horizon_days: number
+  expires_at: string
+  expired_safeguard_ids: number[]
+  coverage_score: number
+  risk_rank_after: string
+  risk_rank_increased: boolean
+  uncovered_paths: PathEvidence[]
+}
+
+export interface FailureWindowForecast {
+  window_days: number
+  window_end: string
+  events: FailureWindowEvent[]
+  first_escalation?: FailureWindowEvent
+  escalation_within_window: boolean
+  forecast_note: string
+}
+
 export interface EvaluationExplanation {
   summary: string
   paths: PathEvidence[]
@@ -68,8 +87,22 @@ export interface CoverageEvaluation {
   evaluated_at: string
   input_hash?: string
   deduplicated_safeguards?: DeduplicatedSafeguard[]
+  failure_window_days?: number
+  failure_forecast?: FailureWindowForecast
   duration_milliseconds?: number
   determinism_replay_passed?: boolean
 }
 
-export interface CoverageRunInput { scenario_id: number }
+export interface CoverageRunInput { scenario_id: number; failure_window_days?: number }
+
+export interface EvaluationComparison {
+  base_id: number
+  compared_id: number
+  score_delta: number
+  uncovered_path_delta: number
+  risk_rank_changed: boolean
+  input_changed: boolean
+  base_escalation_days?: number
+  other_escalation_days?: number
+  escalation_changed: boolean
+}

@@ -1,4 +1,5 @@
 package service
+
 import (
 	"context"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 )
+
 type CoverageEvaluationService interface {
 	Run(context.Context, dto.RunCoverageEvaluationRequest, string, util.Actor) (dto.CoverageEvaluationResponse, bool, error)
 	Get(context.Context, uint) (dto.CoverageEvaluationResponse, error)
@@ -32,6 +34,7 @@ type coverageEvaluationService struct {
 	evaluator   *algorithm.Evaluator
 	now         func() time.Time
 }
+
 func NewCoverageEvaluationService(
 	evaluations repository.CoverageEvaluationRepository,
 	scenarios repository.DeviationScenarioRepository,
@@ -46,6 +49,13 @@ func NewCoverageEvaluationService(
 		now: func() time.Time { return time.Now().UTC() },
 	}
 }
+
+// withClock overrides the frozen reference-time clock. It is used by tests to
+// keep evaluations deterministic; production wiring keeps the wall clock.
+func (s *coverageEvaluationService) withClock(clock func() time.Time) *coverageEvaluationService {
+	s.now = clock
+	return s
+}
 func (s *coverageEvaluationService) Run(
 	ctx context.Context,
 	request dto.RunCoverageEvaluationRequest,
@@ -59,7 +69,15 @@ func (s *coverageEvaluationService) Run(
 			"Idempotency-Key header must contain 8 to 128 characters",
 		)
 	}
-	existing, err := s.evaluations.FindByIdempotencyKey(ctx, key)
+	windowDays := request.FailureWindowDays
+	if request.FailureWindowDays != 0 && (request.FailureWindowDays < algorithm.MinFailureWindowDays || request.FailureWindowDays > algorithm.MaxFailureWindowDays) {
+		return dto.CoverageEvaluationResponse{}, false, util.NewError(
+			http.StatusBadRequest, util.CodeValidation,
+			fmt.Sprintf("failure_window_days must be between %d and %d", algorithm.MinFailureWindowDays, algorithm.MaxFailureWindowDays),
+		)
+	}
+	windowDays = algorithm.NormalizeWindowDays(windowDays)
+	existing, err := s.evaluations.FindByIdempotencyKey(ctx, key, windowDays)
 	if err == nil {
 		return dto.NewCoverageEvaluationResponse(existing), true, nil
 	}
@@ -82,7 +100,7 @@ func (s *coverageEvaluationService) Run(
 		return dto.CoverageEvaluationResponse{}, false, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to load scenario safeguards", err)
 	}
 	referenceTime := s.now().Truncate(time.Second)
-	snapshot := algorithm.NewSnapshot(node, scenario, safeguards, referenceTime)
+	snapshot := algorithm.NewSnapshot(node, scenario, safeguards, referenceTime, windowDays)
 	snapshotJSON, err := util.CanonicalJSON(snapshot)
 	if err != nil {
 		return dto.CoverageEvaluationResponse{}, false, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to freeze evaluation input", err)
@@ -91,6 +109,7 @@ func (s *coverageEvaluationService) Run(
 		ScenarioID: scenario.ID, AlgorithmVersion: algorithm.Version,
 		InputSnapshot: snapshotJSON, InputHash: util.HashString(snapshotJSON),
 		UncoveredPaths: "[]", DeduplicatedSafeguards: "[]", Explanation: "{}",
+		FailureWindowDays: windowDays, FailureForecast: "{}",
 		RiskRankBefore: dto.RiskRank(scenario.InitialRisk()), RiskRankAfter: dto.RiskRank(scenario.InitialRisk()),
 		EvaluationState: string(constants.CoverageQueued),
 		EvaluatedBy:     actor.UserID, EvaluatedByName: actor.Username,
@@ -99,7 +118,7 @@ func (s *coverageEvaluationService) Run(
 	}
 	if err := s.evaluations.Create(ctx, &evaluation); err != nil {
 		if uniqueViolation(err) {
-			existing, findErr := s.evaluations.FindByIdempotencyKey(ctx, key)
+			existing, findErr := s.evaluations.FindByIdempotencyKey(ctx, key, windowDays)
 			if findErr == nil {
 				return dto.NewCoverageEvaluationResponse(existing), true, nil
 			}
@@ -137,6 +156,7 @@ func (s *coverageEvaluationService) Run(
 		"input_snapshot": result.SnapshotJSON, "input_hash": result.InputHash,
 		"coverage_score": result.CoverageScore, "uncovered_paths": result.UncoveredJSON,
 		"deduplicated_safeguards": result.DeduplicatedJSON, "explanation": result.ExplanationJSON,
+		"failure_window_days": windowDays, "failure_forecast": result.FailureForecastJSON,
 		"risk_rank_before": result.RiskBefore, "risk_rank_after": result.RiskAfter,
 		"duration_milliseconds": duration, "failure_reason": "",
 	}
@@ -152,10 +172,12 @@ func (s *coverageEvaluationService) Run(
 		return dto.CoverageEvaluationResponse{}, false, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to reload coverage evaluation", err)
 	}
 	summary, _ := util.CanonicalJSON(map[string]any{
-		"coverage_score":   evaluation.CoverageScore,
-		"risk_rank_before": evaluation.RiskRankBefore,
-		"risk_rank_after":  evaluation.RiskRankAfter,
-		"uncovered_paths":  len(result.Explanation.Paths) - countCovered(result.Explanation.Paths),
+		"coverage_score":           evaluation.CoverageScore,
+		"risk_rank_before":         evaluation.RiskRankBefore,
+		"risk_rank_after":          evaluation.RiskRankAfter,
+		"uncovered_paths":          len(result.Explanation.Paths) - countCovered(result.Explanation.Paths),
+		"failure_window_days":      windowDays,
+		"escalation_within_window": result.FailureForecast.EscalationWithin,
 	})
 	log := model.AuditLog{
 		RequestID: actor.RequestID, ActorID: actor.UserID, ActorName: actor.Username,
@@ -279,7 +301,7 @@ func (s *coverageEvaluationService) Replay(
 		}
 		return dto.CoverageEvaluationResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to load coverage evaluation", err)
 	}
-	passed, _, err := s.evaluator.Replay(evaluation.InputSnapshot, evaluation.InputHash, evaluation.CoverageScore)
+	passed, _, err := s.evaluator.Replay(evaluation.InputSnapshot, evaluation.InputHash, evaluation.CoverageScore, evaluation.FailureForecast)
 	if err != nil {
 		return dto.CoverageEvaluationResponse{}, util.WrapError(http.StatusUnprocessableEntity, util.CodeValidation, "evaluation could not be replayed", err)
 	}
@@ -325,13 +347,34 @@ func (s *coverageEvaluationService) Compare(
 	}
 	baseResponse := dto.NewCoverageEvaluationResponse(base)
 	otherResponse := dto.NewCoverageEvaluationResponse(other)
-	return dto.EvaluationComparisonResponse{
+	comparison := dto.EvaluationComparisonResponse{
 		BaseID: base.ID, ComparedID: other.ID,
-		ScoreDelta:         other.CoverageScore - base.CoverageScore,
-		UncoveredPathDelta: len(otherResponse.UncoveredPaths) - len(baseResponse.UncoveredPaths),
-		RiskRankChanged:    base.RiskRankAfter != other.RiskRankAfter,
-		InputChanged:       base.InputHash != other.InputHash,
-	}, nil
+		ScoreDelta:          other.CoverageScore - base.CoverageScore,
+		UncoveredPathDelta:  len(otherResponse.UncoveredPaths) - len(baseResponse.UncoveredPaths),
+		RiskRankChanged:     base.RiskRankAfter != other.RiskRankAfter,
+		InputChanged:        base.InputHash != other.InputHash,
+		BaseEscalationDays:  escalationHorizon(baseResponse.FailureForecast),
+		OtherEscalationDays: escalationHorizon(otherResponse.FailureForecast),
+	}
+	comparison.EscalationChanged = !sameEscalationDay(comparison.BaseEscalationDays, comparison.OtherEscalationDays)
+	return comparison, nil
+}
+
+// escalationHorizon returns the day offset of the first risk-rank escalation
+// inside the frozen failure window, or nil when no escalation is projected.
+func escalationHorizon(forecast dto.FailureWindowForecastResponse) *int {
+	if !forecast.EscalationWithin || forecast.FirstEscalation == nil {
+		return nil
+	}
+	days := forecast.FirstEscalation.HorizonDays
+	return &days
+}
+
+func sameEscalationDay(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 func (s *coverageEvaluationService) recordStateAudit(
 	ctx context.Context,

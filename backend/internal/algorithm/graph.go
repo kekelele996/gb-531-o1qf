@@ -1,4 +1,5 @@
 package algorithm
+
 import (
 	"fmt"
 	"hazop-safeguard-coverage/backend/internal/model"
@@ -6,13 +7,16 @@ import (
 	"strings"
 	"time"
 )
-const Version = "hazop-cover-v1.0.0"
+
+const Version = "hazop-cover-v1.1.0"
+
 type Snapshot struct {
-	AlgorithmVersion string              `json:"algorithm_version"`
-	ReferenceTime    time.Time           `json:"reference_time"`
-	Node             SnapshotNode        `json:"node"`
-	Scenario         SnapshotScenario    `json:"scenario"`
-	Safeguards       []SnapshotSafeguard `json:"safeguards"`
+	AlgorithmVersion  string              `json:"algorithm_version"`
+	ReferenceTime     time.Time           `json:"reference_time"`
+	FailureWindowDays int                 `json:"failure_window_days"`
+	Node              SnapshotNode        `json:"node"`
+	Scenario          SnapshotScenario    `json:"scenario"`
+	Safeguards        []SnapshotSafeguard `json:"safeguards"`
 }
 type SnapshotNode struct {
 	ID                uint    `json:"id"`
@@ -68,7 +72,8 @@ type GraphPath struct {
 	Cause       string `json:"cause"`
 	Consequence string `json:"consequence"`
 }
-func NewSnapshot(node model.ProcessNode, scenario model.DeviationScenario, safeguards []model.Safeguard, reference time.Time) Snapshot {
+
+func NewSnapshot(node model.ProcessNode, scenario model.DeviationScenario, safeguards []model.Safeguard, reference time.Time, windowDays int) Snapshot {
 	ordered := append([]model.Safeguard(nil), safeguards...)
 	sort.Slice(ordered, func(i, j int) bool {
 		if ordered[i].IndependenceKey == ordered[j].IndependenceKey {
@@ -77,8 +82,9 @@ func NewSnapshot(node model.ProcessNode, scenario model.DeviationScenario, safeg
 		return ordered[i].IndependenceKey < ordered[j].IndependenceKey
 	})
 	snapshot := Snapshot{
-		AlgorithmVersion: Version,
-		ReferenceTime:    reference.UTC().Truncate(time.Second),
+		AlgorithmVersion:  Version,
+		ReferenceTime:     reference.UTC().Truncate(time.Second),
+		FailureWindowDays: NormalizeWindowDays(windowDays),
 		Node: SnapshotNode{
 			ID: node.ID, NodeCode: node.NodeCode, Name: node.Name, UnitName: node.UnitName,
 			Medium: node.Medium, DesignPressure: node.DesignPressure, DesignTemperature: node.DesignTemperature,

@@ -24,11 +24,11 @@ func TestEvaluatorIsDeterministicAndDeduplicatesIndependenceKeys(t *testing.T) {
 		{ID: 4, IndependenceKey: "PSV-B", Effectiveness: 0.9, TestIntervalDays: 365, LastVerifiedAt: &expired, LifecycleState: "expired"},
 	}
 	evaluator := NewEvaluator()
-	first, err := evaluator.Evaluate(NewSnapshot(node, scenario, safeguards, reference))
+	first, err := evaluator.Evaluate(NewSnapshot(node, scenario, safeguards, reference, DefaultFailureWindowDays))
 	if err != nil {
 		t.Fatalf("first evaluation failed: %v", err)
 	}
-	second, err := evaluator.Evaluate(NewSnapshot(node, scenario, safeguards, reference))
+	second, err := evaluator.Evaluate(NewSnapshot(node, scenario, safeguards, reference, DefaultFailureWindowDays))
 	if err != nil {
 		t.Fatalf("second evaluation failed: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestEvaluatorIsDeterministicAndDeduplicatesIndependenceKeys(t *testing.T) {
 	if len(first.Explanation.Deduplicated) != 1 || first.Explanation.Deduplicated[0].KeptID != 2 {
 		t.Fatalf("unexpected deduplication: %#v", first.Explanation.Deduplicated)
 	}
-	passed, replayed, err := evaluator.Replay(first.SnapshotJSON, first.InputHash, first.CoverageScore)
+	passed, replayed, err := evaluator.Replay(first.SnapshotJSON, first.InputHash, first.CoverageScore, first.FailureForecastJSON)
 	if err != nil || !passed || replayed.CoverageScore != first.CoverageScore {
 		t.Fatalf("replay failed: passed=%t score=%v err=%v", passed, replayed.CoverageScore, err)
 	}
@@ -56,7 +56,7 @@ func TestEvaluatorDetectsUnprotectedPaths(t *testing.T) {
 		Cause: "blocked outlet", Consequence: "rupture", Likelihood: 3, Severity: 5,
 		ScenarioState: "draft", Version: 1,
 	}
-	result, err := NewEvaluator().Evaluate(NewSnapshot(node, scenario, nil, reference))
+	result, err := NewEvaluator().Evaluate(NewSnapshot(node, scenario, nil, reference, DefaultFailureWindowDays))
 	if err != nil {
 		t.Fatalf("evaluation failed: %v", err)
 	}
