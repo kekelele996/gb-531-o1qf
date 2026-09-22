@@ -34,6 +34,50 @@ export interface DeduplicatedSafeguard {
   reason: string
 }
 
+export interface FailureEvent {
+  expires_at: string
+  days_from_reference: number
+  expiring_safeguard_ids: number[]
+  coverage_score: number
+  risk_rank_before: string
+  risk_rank_after: string
+  risk_rank_rises: boolean
+  uncovered_paths: PathEvidence[]
+}
+
+export interface FailureProjection {
+  window_days: number
+  window_end: string
+  baseline_coverage_score: number
+  baseline_rank_after: string
+  window_end_coverage_score: number
+  window_end_rank_after: string
+  no_escalation: boolean
+  earliest_escalation?: FailureEvent
+  events: FailureEvent[]
+}
+
+export interface FailureWindowSummary {
+  window_days: number
+  window_end?: string
+  no_escalation: boolean
+  earliest_escalation?: FailureEvent
+  window_end_coverage_score: number
+  window_end_rank_after: string
+}
+
+export interface EvaluationComparison {
+  base_id: number
+  compared_id: number
+  score_delta: number
+  uncovered_path_delta: number
+  risk_rank_changed: boolean
+  input_changed: boolean
+  base_window: FailureWindowSummary
+  compared_window: FailureWindowSummary
+  failure_projection_changed: boolean
+}
+
 export interface EvaluationExplanation {
   summary: string
   paths: PathEvidence[]
@@ -41,6 +85,7 @@ export interface EvaluationExplanation {
   deduplicated_safeguards: DeduplicatedSafeguard[]
   boundary_note: string
   reference_time: string
+  failure_window_days?: number
 }
 
 export interface CoverageSnapshot {
@@ -63,6 +108,8 @@ export interface CoverageEvaluation {
   risk_rank_after: string
   evaluation_state: CoverageState
   explanation: EvaluationExplanation | string
+  failure_window_days: number
+  failure_projection: FailureProjection | string
   evaluated_by: number
   evaluated_by_name?: string
   evaluated_at: string
@@ -72,4 +119,11 @@ export interface CoverageEvaluation {
   determinism_replay_passed?: boolean
 }
 
-export interface CoverageRunInput { scenario_id: number }
+export const DEFAULT_FAILURE_WINDOW_DAYS = 30
+export const MIN_FAILURE_WINDOW_DAYS = 1
+export const MAX_FAILURE_WINDOW_DAYS = 365
+
+export interface CoverageRunInput {
+  scenario_id: number
+  failure_window_days: number
+}

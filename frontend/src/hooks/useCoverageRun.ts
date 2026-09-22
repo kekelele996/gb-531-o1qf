@@ -1,6 +1,7 @@
 import { onUnmounted, ref } from 'vue'
 import { useCoverageEvaluationStore } from '../stores/coverage-evaluation'
 import type { CoverageEvaluation } from '../types/coverage-evaluation'
+import { DEFAULT_FAILURE_WINDOW_DAYS } from '../types/coverage-evaluation'
 
 const terminal = new Set(['completed', 'failed', 'confirmed', 'voided'])
 
@@ -31,12 +32,12 @@ export function useCoverageRun() {
     return current
   }
 
-  async function launch(scenarioId: number) {
+  async function launch(scenarioId: number, failureWindowDays = DEFAULT_FAILURE_WINDOW_DAYS) {
     stop()
     running.value = true
     try {
-      const key = `coverage-${scenarioId}-${crypto.randomUUID()}`
-      return await watch(await store.run(scenarioId, key))
+      const key = `coverage-${scenarioId}-w${failureWindowDays}-${crypto.randomUUID()}`
+      return await watch(await store.run({ scenario_id: scenarioId, failure_window_days: failureWindowDays }, key))
     } finally { running.value = false }
   }
 

@@ -1,6 +1,8 @@
 package service
+
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"gorm.io/gorm"
@@ -14,6 +16,7 @@ import (
 	"strings"
 	"time"
 )
+
 type CoverageEvaluationService interface {
 	Run(context.Context, dto.RunCoverageEvaluationRequest, string, util.Actor) (dto.CoverageEvaluationResponse, bool, error)
 	Get(context.Context, uint) (dto.CoverageEvaluationResponse, error)
@@ -32,6 +35,7 @@ type coverageEvaluationService struct {
 	evaluator   *algorithm.Evaluator
 	now         func() time.Time
 }
+
 func NewCoverageEvaluationService(
 	evaluations repository.CoverageEvaluationRepository,
 	scenarios repository.DeviationScenarioRepository,
@@ -59,6 +63,13 @@ func (s *coverageEvaluationService) Run(
 			"Idempotency-Key header must contain 8 to 128 characters",
 		)
 	}
+	windowDays := dto.NormalizeFailureWindow(request.FailureWindowDays)
+	if windowDays < dto.MinFailureWindowDays || windowDays > dto.MaxFailureWindowDays {
+		return dto.CoverageEvaluationResponse{}, false, util.NewError(
+			http.StatusBadRequest, util.CodeValidation,
+			fmt.Sprintf("failure_window_days must be between %d and %d", dto.MinFailureWindowDays, dto.MaxFailureWindowDays),
+		)
+	}
 	existing, err := s.evaluations.FindByIdempotencyKey(ctx, key)
 	if err == nil {
 		return dto.NewCoverageEvaluationResponse(existing), true, nil
@@ -82,7 +93,7 @@ func (s *coverageEvaluationService) Run(
 		return dto.CoverageEvaluationResponse{}, false, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to load scenario safeguards", err)
 	}
 	referenceTime := s.now().Truncate(time.Second)
-	snapshot := algorithm.NewSnapshot(node, scenario, safeguards, referenceTime)
+	snapshot := algorithm.NewSnapshot(node, scenario, safeguards, referenceTime, windowDays)
 	snapshotJSON, err := util.CanonicalJSON(snapshot)
 	if err != nil {
 		return dto.CoverageEvaluationResponse{}, false, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to freeze evaluation input", err)
@@ -91,6 +102,7 @@ func (s *coverageEvaluationService) Run(
 		ScenarioID: scenario.ID, AlgorithmVersion: algorithm.Version,
 		InputSnapshot: snapshotJSON, InputHash: util.HashString(snapshotJSON),
 		UncoveredPaths: "[]", DeduplicatedSafeguards: "[]", Explanation: "{}",
+		FailureProjection: "{}", FailureWindowDays: windowDays,
 		RiskRankBefore: dto.RiskRank(scenario.InitialRisk()), RiskRankAfter: dto.RiskRank(scenario.InitialRisk()),
 		EvaluationState: string(constants.CoverageQueued),
 		EvaluatedBy:     actor.UserID, EvaluatedByName: actor.Username,
@@ -137,6 +149,7 @@ func (s *coverageEvaluationService) Run(
 		"input_snapshot": result.SnapshotJSON, "input_hash": result.InputHash,
 		"coverage_score": result.CoverageScore, "uncovered_paths": result.UncoveredJSON,
 		"deduplicated_safeguards": result.DeduplicatedJSON, "explanation": result.ExplanationJSON,
+		"failure_window_days": result.FailureWindowDays, "failure_projection": result.ProjectionJSON,
 		"risk_rank_before": result.RiskBefore, "risk_rank_after": result.RiskAfter,
 		"duration_milliseconds": duration, "failure_reason": "",
 	}
@@ -152,10 +165,12 @@ func (s *coverageEvaluationService) Run(
 		return dto.CoverageEvaluationResponse{}, false, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to reload coverage evaluation", err)
 	}
 	summary, _ := util.CanonicalJSON(map[string]any{
-		"coverage_score":   evaluation.CoverageScore,
-		"risk_rank_before": evaluation.RiskRankBefore,
-		"risk_rank_after":  evaluation.RiskRankAfter,
-		"uncovered_paths":  len(result.Explanation.Paths) - countCovered(result.Explanation.Paths),
+		"coverage_score":      evaluation.CoverageScore,
+		"risk_rank_before":    evaluation.RiskRankBefore,
+		"risk_rank_after":     evaluation.RiskRankAfter,
+		"failure_window_days": evaluation.FailureWindowDays,
+		"earliest_escalation": earliestEscalationSummary(result.Projection),
+		"uncovered_paths":     len(result.Explanation.Paths) - countCovered(result.Explanation.Paths),
 	})
 	log := model.AuditLog{
 		RequestID: actor.RequestID, ActorID: actor.UserID, ActorName: actor.Username,
@@ -279,7 +294,9 @@ func (s *coverageEvaluationService) Replay(
 		}
 		return dto.CoverageEvaluationResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to load coverage evaluation", err)
 	}
-	passed, _, err := s.evaluator.Replay(evaluation.InputSnapshot, evaluation.InputHash, evaluation.CoverageScore)
+	passed, _, err := s.evaluator.Replay(
+		evaluation.InputSnapshot, evaluation.InputHash, evaluation.CoverageScore, evaluation.FailureProjection,
+	)
 	if err != nil {
 		return dto.CoverageEvaluationResponse{}, util.WrapError(http.StatusUnprocessableEntity, util.CodeValidation, "evaluation could not be replayed", err)
 	}
@@ -325,13 +342,92 @@ func (s *coverageEvaluationService) Compare(
 	}
 	baseResponse := dto.NewCoverageEvaluationResponse(base)
 	otherResponse := dto.NewCoverageEvaluationResponse(other)
+	baseWindow := failureWindowSummary(base)
+	otherWindow := failureWindowSummary(other)
 	return dto.EvaluationComparisonResponse{
 		BaseID: base.ID, ComparedID: other.ID,
-		ScoreDelta:         other.CoverageScore - base.CoverageScore,
-		UncoveredPathDelta: len(otherResponse.UncoveredPaths) - len(baseResponse.UncoveredPaths),
-		RiskRankChanged:    base.RiskRankAfter != other.RiskRankAfter,
-		InputChanged:       base.InputHash != other.InputHash,
+		ScoreDelta:               other.CoverageScore - base.CoverageScore,
+		UncoveredPathDelta:       len(otherResponse.UncoveredPaths) - len(baseResponse.UncoveredPaths),
+		RiskRankChanged:          base.RiskRankAfter != other.RiskRankAfter,
+		InputChanged:             base.InputHash != other.InputHash,
+		BaseWindow:               baseWindow,
+		ComparedWindow:           otherWindow,
+		FailureProjectionChanged: failureProjectionsDiffer(base.FailureProjection, other.FailureProjection),
 	}, nil
+}
+
+// failureWindowSummary extracts the frozen prediction carried by an evaluation
+// so historical versions never recompute it from live safeguard data.
+func failureWindowSummary(evaluation model.CoverageEvaluation) dto.FailureWindowSummary {
+	summary := dto.FailureWindowSummary{WindowDays: evaluation.FailureWindowDays}
+	var projection dto.FailureProjectionResponse
+	if err := json.Unmarshal([]byte(evaluation.FailureProjection), &projection); err != nil || projection.WindowDays == 0 {
+		return summary
+	}
+	windowEnd := projection.WindowEnd
+	summary.WindowEnd = &windowEnd
+	summary.NoEscalation = projection.NoEscalation
+	summary.EarliestEscalation = projection.EarliestEscalation
+	summary.WindowEndCoverage = projection.WindowEndCoverage
+	summary.WindowEndRiskAfter = projection.WindowEndRiskAfter
+	return summary
+}
+
+// failureProjectionsDiffer compares only the deterministic prediction fields;
+// absolute reference/window timestamps are deliberately excluded.
+func failureProjectionsDiffer(baseJSON, otherJSON string) bool {
+	reduce := func(raw string) (any, bool) {
+		var projection dto.FailureProjectionResponse
+		if err := json.Unmarshal([]byte(raw), &projection); err != nil {
+			return nil, false
+		}
+		signature := struct {
+			WindowDays, EventCount, GapCount int
+			NoEscalation                     bool
+			EarliestOffset                   int
+			EarliestScore                    float64
+			EarliestRankAfter                string
+			WindowEndScore                   float64
+			WindowEndRank                    string
+		}{
+			WindowDays: projection.WindowDays, EventCount: len(projection.Events),
+			NoEscalation:   projection.NoEscalation,
+			WindowEndScore: projection.WindowEndCoverage, WindowEndRank: projection.WindowEndRiskAfter,
+		}
+		if event := projection.EarliestEscalation; event != nil {
+			signature.EarliestOffset = event.DaysFromReference
+			signature.EarliestScore = event.CoverageScore
+			signature.EarliestRankAfter = event.RiskRankAfter
+			signature.GapCount = len(event.UncoveredPaths)
+		}
+		return signature, true
+	}
+	baseSignature, baseOK := reduce(baseJSON)
+	otherSignature, otherOK := reduce(otherJSON)
+	if !baseOK || !otherOK {
+		return baseJSON != otherJSON
+	}
+	return baseSignature != otherSignature
+}
+
+func earliestEscalationSummary(projection *dto.FailureProjectionResponse) map[string]any {
+	if projection == nil {
+		return map[string]any{"no_escalation": true}
+	}
+	if projection.NoEscalation || projection.EarliestEscalation == nil {
+		return map[string]any{"no_escalation": true, "window_days": projection.WindowDays}
+	}
+	event := projection.EarliestEscalation
+	return map[string]any{
+		"no_escalation":   false,
+		"window_days":     projection.WindowDays,
+		"escalation_date": event.ExpiresAt,
+		"days_offset":     event.DaysFromReference,
+		"coverage_score":  event.CoverageScore,
+		"rank_before":     event.RiskRankBefore,
+		"rank_after":      event.RiskRankAfter,
+		"gap_paths":       len(event.UncoveredPaths),
+	}
 }
 func (s *coverageEvaluationService) recordStateAudit(
 	ctx context.Context,

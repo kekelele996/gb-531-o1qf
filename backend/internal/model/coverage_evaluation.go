@@ -16,6 +16,8 @@ type CoverageEvaluation struct {
 	RiskRankAfter           string            `gorm:"size:24;not null" json:"risk_rank_after"`
 	EvaluationState         string            `gorm:"size:24;not null;index" json:"evaluation_state"`
 	Explanation             string            `gorm:"type:text;not null" json:"explanation"`
+	FailureWindowDays       int               `gorm:"not null;default:30" json:"failure_window_days"`
+	FailureProjection       string            `gorm:"type:text;not null;default:'{}'" json:"failure_projection"`
 	EvaluatedBy             uint              `gorm:"not null;index" json:"evaluated_by"`
 	EvaluatedByName         string            `gorm:"size:80;not null" json:"evaluated_by_name"`
 	EvaluatedAt             time.Time         `gorm:"not null" json:"evaluated_at"`

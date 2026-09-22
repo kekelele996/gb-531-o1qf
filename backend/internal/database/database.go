@@ -1,4 +1,5 @@
 package database
+
 import (
 	"context"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"hazop-safeguard-coverage/backend/internal/model"
 	"time"
 )
+
 func Open(cfg config.Config) (*gorm.DB, error) {
 	var dialector gorm.Dialector
 	switch cfg.DBDriver {
@@ -70,12 +72,14 @@ func migrate(db *gorm.DB) error {
 	}
 	return nil
 }
+
 type seedAccount struct {
 	Username    string
 	DisplayName string
 	Password    string
 	Role        constants.Role
 }
+
 func seed(db *gorm.DB) error {
 	accounts := []seedAccount{
 		{Username: "admin", DisplayName: "System Administrator", Password: "admin123", Role: constants.RoleAdmin},
@@ -163,12 +167,24 @@ func seedDomain(tx *gorm.DB, users map[string]model.User) error {
 			ReviewedBy: &reviewer.ID, ReviewedByName: reviewer.Username,
 			CreatedAt: now.Add(-72 * time.Hour), UpdatedAt: now.Add(-12 * time.Hour),
 		},
+		{
+			ProcessNodeID: nodes[1].ID, Guideword: "more", Parameter: "level",
+			Cause:       "Liquid carry-over from upstream; outlet restriction",
+			Consequence: "High level trip and hot gas release to flare",
+			Likelihood:  4, Severity: 4, ScenarioState: "analyzed", Version: 1,
+			CreatedBy: engineer.ID, CreatedByName: engineer.Username,
+			CreatedAt: now.Add(-24 * time.Hour), UpdatedAt: now.Add(-6 * time.Hour),
+		},
 	}
 	if err := tx.Create(&scenarios).Error; err != nil {
 		return fmt.Errorf("create seed deviation scenarios: %w", err)
 	}
 	validVerification := now.AddDate(0, 0, -20)
 	expiredVerification := now.AddDate(0, 0, -500)
+	// Proof test 15 days ago with a 25 day interval: independent layer expires
+	// ten days after the evaluation freeze point and demonstrates the default
+	// 30 day failure-window escalation.
+	nearExpiryVerification := now.AddDate(0, 0, -15)
 	safeguards := []model.Safeguard{
 		{
 			Name: "High temperature SIS trip", SafeguardType: "interlock",
@@ -185,6 +201,13 @@ func seedDomain(tx *gorm.DB, users map[string]model.User) error {
 			LastVerificationBy: &reviewer.ID, CreatedAt: now, UpdatedAt: now,
 		},
 		{
+			Name: "Reactor deluge water curtain", SafeguardType: "containment",
+			TargetScenarioID: scenarios[0].ID, IndependenceKey: "DLG-R101-FIRE",
+			Effectiveness: 0.6, TestIntervalDays: 25, LastVerifiedAt: &nearExpiryVerification,
+			LifecycleState: "active", EvidenceNote: "Proof test expires 10 days after evaluation; demonstrates the failure-window prediction",
+			LastVerificationBy: &reviewer.ID, CreatedAt: now, UpdatedAt: now,
+		},
+		{
 			Name: "Separator pressure relief valve", SafeguardType: "relief",
 			TargetScenarioID: scenarios[1].ID, IndependenceKey: "PSV-V204-01",
 			Effectiveness: 0.9, TestIntervalDays: 365, LastVerifiedAt: &expiredVerification,
@@ -196,6 +219,13 @@ func seedDomain(tx *gorm.DB, users map[string]model.User) error {
 			TargetScenarioID: scenarios[2].ID, IndependenceKey: "NRV-R101-FEED",
 			Effectiveness: 0.7, TestIntervalDays: 180, LastVerifiedAt: &validVerification,
 			LifecycleState: "active", EvidenceNote: "Inspection record CV-882",
+			LastVerificationBy: &reviewer.ID, CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			Name: "Separator high level alarm", SafeguardType: "alarm",
+			TargetScenarioID: scenarios[3].ID, IndependenceKey: "LAH-V204-LEVEL",
+			Effectiveness: 0.5, TestIntervalDays: 25, LastVerifiedAt: &nearExpiryVerification,
+			LifecycleState: "active", EvidenceNote: "Functional test expires 10 days after evaluation; baseline residual rank is medium and rises to high inside the default failure window",
 			LastVerificationBy: &reviewer.ID, CreatedAt: now, UpdatedAt: now,
 		},
 	}
